@@ -38,39 +38,41 @@ async function fetchRedditText(redditUrl) {
   }
 }
 
-// --- TTS con OpenAI (mp3) ---
-async function ttsOpenAI(text, uiVoice, outPath) {
+// --- TTS con AWS Polly (mp3) ---
+async function ttsPolly(text, uiVoice, outPath) {
+  // Voces comunes (puedes cambiarlas): es-ES Conchita/Enrique, es-MX Mia, es-US Lupe,
+  // en-US Joanna/Matthew, etc.
   const voiceMap = {
-    "male-energetic": "alloy",
-    "female-calm": "alloy",
-    "male-deep": "alloy",
-    "female-enthusiastic": "alloy",
+    "female-calm": "Lucia",           // es-ES
+    "female-enthusiastic": "Lucia",   // es-ES
+    "male-deep": "Enrique",           // es-ES
+    "male-energetic": "Miguel"        // es-ES
   };
-  const voice = voiceMap[uiVoice] || "alloy";
+  const voiceId = voiceMap[uiVoice] || "Lucia";
 
-  const res = await fetch("https://api.openai.com/v1/audio/speech", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "tts-1",
-      voice,
-      input: text,
-      format: "mp3"
-    })
+  const { PollyClient, SynthesizeSpeechCommand } = await import("@aws-sdk/client-polly");
+  const client = new PollyClient({ region: process.env.AWS_REGION || "us-east-1" });
+
+  const cmd = new SynthesizeSpeechCommand({
+    OutputFormat: "mp3",
+    Text: text,
+    VoiceId: voiceId,
+    Engine: "standard" // prueba "neural" si tu región lo soporta
   });
 
-  if (!res.ok) {
-    const err = await res.text().catch(() => "");
-    throw new Error("OpenAI TTS error: " + err);
-  }
+  const resp = await client.send(cmd);
 
-  const buf = Buffer.from(await res.arrayBuffer());
-  await fs.promises.writeFile(outPath, buf);
+  await new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(outPath);
+    resp.AudioStream.pipe(ws);
+    resp.AudioStream.on("error", reject);
+    ws.on("finish", resolve);
+    ws.on("error", reject);
+  });
+
   return outPath;
 }
+
 
 // --- Crear subtítulos SRT ---
 function makeSrtFromText(text, audioDurationSec, outSrtPath) {
