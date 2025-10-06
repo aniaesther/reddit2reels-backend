@@ -41,12 +41,12 @@ async function fetchRedditText(redditUrl) {
 // --- Generar voz con ElevenLabs ---
 async function ttsElevenLabs(text, uiVoice, outPath) {
   const map = {
-    "male-energetic": "Antoni",
-    "female-calm": "Rachel",
-    "male-deep": "Adam",
-    "female-enthusiastic": "Bella"
-  };
-  const voiceId = map[uiVoice] || "Rachel";
+  "male-energetic": "ErXwobaYiN019PkySvjV", // Antoni
+  "female-calm": "21m00Tcm4TlvDq8ikWAM",    // Rachel
+  "male-deep": "pNInz6obpgDQGcFmaJgB",      // Adam
+  "female-enthusiastic": "EXAVITQu4vr4xnSDxMaL" // Bella
+};
+const voiceId = map[uiVoice] || "21m00Tcm4TlvDq8ikWAM";
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
     voiceId
