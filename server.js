@@ -171,7 +171,15 @@ app.post("/api/generate", async (req, res) => {
     const srtPath = path.join(workDir, "captions.srt");
     const outMp4 = path.join(workDir, "video.mp4");
 
+    const prov = (process.env.TTS_PROVIDER || "").toLowerCase();
+    if (prov === "polly") {
+    await ttsPolly(bodyText, voice, audioPath);
+    } else if (prov === "openai") {
     await ttsOpenAI(bodyText, voice, audioPath);
+    } else {
+   // fallback por si no seteaste variable (puedes dejar polly por defecto)
+   await ttsPolly(bodyText, voice, audioPath);
+  }
     const dur = await getAudioDurationSec(audioPath);
     makeSrtFromText(bodyText, dur, srtPath);
     const maxDurationSec = duration ? Number(duration) : undefined;
