@@ -38,36 +38,33 @@ async function fetchRedditText(redditUrl) {
   }
 }
 
-// --- Generar voz con ElevenLabs ---
-async function ttsElevenLabs(text, uiVoice, outPath) {
-  const map = {
-  "male-energetic": "ErXwobaYiN019PkySvjV", // Antoni
-  "female-calm": "21m00Tcm4TlvDq8ikWAM",    // Rachel
-  "male-deep": "pNInz6obpgDQGcFmaJgB",      // Adam
-  "female-enthusiastic": "EXAVITQu4vr4xnSDxMaL" // Bella
-};
-const voiceId = map[uiVoice] || "21m00Tcm4TlvDq8ikWAM";
+// --- TTS con OpenAI (mp3) ---
+async function ttsOpenAI(text, uiVoice, outPath) {
+  const voiceMap = {
+    "male-energetic": "alloy",
+    "female-calm": "alloy",
+    "male-deep": "alloy",
+    "female-enthusiastic": "alloy",
+  };
+  const voice = voiceMap[uiVoice] || "alloy";
 
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
-    voiceId
-  )}?optimize_streaming_latency=0&output_format=mp3_44100_128`;
-
-  const res = await fetch(url, {
+  const res = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: {
-      "xi-api-key": process.env.ELEVEN_API_KEY,
+      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      text,
-      model_id: "eleven_multilingual_v2",
-      voice_settings: { stability: 0.4, similarity_boost: 0.85 }
+      model: "tts-1",
+      voice,
+      input: text,
+      format: "mp3"
     })
   });
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error("TTS error: " + errText);
+    const err = await res.text().catch(() => "");
+    throw new Error("OpenAI TTS error: " + err);
   }
 
   const buf = Buffer.from(await res.arrayBuffer());
