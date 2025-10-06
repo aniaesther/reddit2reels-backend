@@ -169,7 +169,7 @@ app.post("/api/generate", async (req, res) => {
     const srtPath = path.join(workDir, "captions.srt");
     const outMp4 = path.join(workDir, "video.mp4");
 
-    await ttsElevenLabs(bodyText, voice, audioPath);
+    await ttsOpenAI(bodyText, voice, audioPath);
     const dur = await getAudioDurationSec(audioPath);
     makeSrtFromText(bodyText, dur, srtPath);
     const maxDurationSec = duration ? Number(duration) : undefined;
