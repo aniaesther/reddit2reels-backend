@@ -129,6 +129,8 @@ function getAudioDurationSec(audioPath) {
 /* ===========================
    RENDER DEL VIDEO
 =========================== */
+
+// 🔥 HOTFIX: render SIN usar `subtitles=` (evita error de FFmpeg)
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
     gaming:   "assets/bg/gaming.mp4",
@@ -142,12 +144,13 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   const usable     = wantsSolid ? false : (requested && fs.existsSync(requested));
   const titleSafe  = (title || "RedditToReels").replace(/:/g, "\\:");
 
-  const runFF = (includeSubs) => new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     let cmd = ffmpeg();
 
     if (usable) {
       cmd = cmd.input(requested);
     } else {
+      // Fondo sintético si no hay clip de fondo válido
       cmd = cmd.input("color=c=0x0a0f1f:s=1080x1920:r=30").inputOptions(["-f", "lavfi"]);
     }
 
@@ -155,14 +158,12 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
       ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
       : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
 
-    let filter = `${base},drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,drawtext=text='${titleSafe}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2`;
-
-    if (includeSubs && fs.existsSync(srtPath)) {
-      const srtPosix = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-      filter += `,subtitles=${srtPosix}`;
-    }
-
-    filter += `[v]`;
+    // Solo título; SIN `subtitles=...`
+    const filter =
+      `${base},` +
+      `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,` +
+      `drawtext=text='${titleSafe}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2` +
+      `[v]`;
 
     cmd
       .input(audioPath)
@@ -179,13 +180,6 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
       .on("end", () => resolve(outMp4))
       .save(outMp4);
   });
-
-  try {
-    return await runFF(true);
-  } catch (e) {
-    console.error("FFmpeg con SRT falló, reintentando sin SRT:", e.message);
-    return await runFF(false);
-  }
 }
 
 /* ===========================
