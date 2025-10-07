@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from "uuid";
 import { fileURLToPath } from "url";
 import "dotenv/config";
 
-// Apuntar fluent-ffmpeg a los binarios estáticos
+// --- Configurar ffmpeg ---
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
@@ -25,12 +25,11 @@ app.use("/outputs", express.static(path.join(__dirname, "outputs")));
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// Página raíz amigable
 app.get("/", (_req, res) => {
   res.send("RedditToReels API ✅ Usa POST /api/generate");
 });
 
-// --- Utilidad para extraer texto de Reddit ---
+// --- Extraer texto desde Reddit ---
 async function fetchRedditText(redditUrl) {
   try {
     const fixed = redditUrl.endsWith("/") ? redditUrl + ".json" : redditUrl + "/.json";
@@ -50,16 +49,15 @@ async function fetchRedditText(redditUrl) {
 }
 
 /* ===========================
-   TTS PROVEEDORES
+   TTS (Text-to-Speech)
 =========================== */
 
-// --- TTS con AWS Polly (mp3) ---
 async function ttsPolly(text, uiVoice, outPath) {
   const voiceMap = {
-    "female-calm": "Lucia",          // es-ES
-    "female-enthusiastic": "Lucia",  // es-ES
-    "male-deep": "Enrique",          // es-ES
-    "male-energetic": "Miguel"       // es-ES
+    "female-calm": "Lucia",
+    "female-enthusiastic": "Lucia",
+    "male-deep": "Enrique",
+    "male-energetic": "Miguel"
   };
   const voiceId = voiceMap[uiVoice] || "Lucia";
 
@@ -70,7 +68,7 @@ async function ttsPolly(text, uiVoice, outPath) {
     OutputFormat: "mp3",
     Text: text,
     VoiceId: voiceId,
-    Engine: "standard" // prueba "neural" si tu región lo soporta
+    Engine: "standard"
   });
 
   const resp = await client.send(cmd);
@@ -86,47 +84,39 @@ async function ttsPolly(text, uiVoice, outPath) {
   return outPath;
 }
 
-// --- TTS con OpenAI (opcional) ---
-async function ttsOpenAI(text, uiVoice, outPath) {
-  const voiceMap = {
-    "male-energetic": "alloy",
-    "female-calm": "alloy",
-    "male-deep": "alloy",
-    "female-enthusiastic": "alloy",
-  };
-  const voice = voiceMap[uiVoice] || "alloy";
-
-  const res = await fetch("https://api.openai.com/v1/audio/speech", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "tts-1",
-      voice,
-      input: text,
-      format: "mp3"
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.text().catch(() => "");
-    throw new Error("OpenAI TTS error: " + err);
-  }
-
-  const buf = Buffer.from(await res.arrayBuffer());
-  await fs.promises.writeFile(outPath, buf);
-  return outPath;
-}
-
 /* ===========================
-   SUBTÍTULOS / RENDER
+   SUBTÍTULOS / AUDIO
 =========================== */
 
-// Crear subtítulos SRT (distribución por longitud)
-// Render con reintento: con SRT -> si falla, sin SRT
-// --- Calcular duración del audio ---
+// --- Crear subtítulos SRT ---
+function makeSrtFromText(text, audioDurationSec, outSrtPath) {
+  const sentences = text.replace(/\n+/g, " ").match(/[^.!?。¡¿]+[.!?。]?/g) || [text];
+  const totalChars = sentences.reduce((a, s) => a + s.length, 0) || 1;
+  let cursor = 0, idx = 1;
+  const lines = [];
+
+  const toTimestamp = (sec) => {
+    const ms = Math.floor(sec * 1000);
+    const h = String(Math.floor(ms / 3600000)).padStart(2, "0");
+    const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, "0");
+    const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, "0");
+    const ms3 = String(ms % 1000).padStart(3, "0");
+    return `${h}:${m}:${s},${ms3}`;
+  };
+
+  sentences.forEach((s) => {
+    const portion = s.length / totalChars;
+    const dur = Math.max(1.2, audioDurationSec * portion);
+    const start = cursor;
+    const end = Math.min(audioDurationSec, cursor + dur);
+    lines.push(`${idx++}\n${toTimestamp(start)} --> ${toTimestamp(end)}\n${s.trim()}\n`);
+    cursor = end;
+  });
+
+  fs.writeFileSync(outSrtPath, lines.join("\n"), "utf8");
+}
+
+// --- Obtener duración del audio ---
 function getAudioDurationSec(audioPath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(audioPath, (err, meta) => {
@@ -136,47 +126,43 @@ function getAudioDurationSec(audioPath) {
   });
 }
 
+/* ===========================
+   RENDER DEL VIDEO
+=========================== */
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
     gaming:   "assets/bg/gaming.mp4",
     abstract: "assets/bg/abstract.mp4",
     city:     "assets/bg/city.mp4",
-    nature:   "assets/bg/nature.mp4",
+    nature:   "assets/bg/nature.mp4"
   };
 
-  // Helpers
   const wantsSolid = String(bgKey || "").toLowerCase() === "solid";
   const requested  = bgMap[bgKey] || bgMap["abstract"];
   const usable     = wantsSolid ? false : (requested && fs.existsSync(requested));
-  const titleForFfmpeg = (title || "RedditToReels").replace(/:/g, "\\:");
+  const titleSafe  = (title || "RedditToReels").replace(/:/g, "\\:");
+
   const runFF = (includeSubs) => new Promise((resolve, reject) => {
     let cmd = ffmpeg();
 
     if (usable) {
       cmd = cmd.input(requested);
     } else {
-      cmd = cmd.input("color=c=0x0a0f1f:s=1080x1920:r=30").inputOptions(["-f","lavfi"]);
+      cmd = cmd.input("color=c=0x0a0f1f:s=1080x1920:r=30").inputOptions(["-f", "lavfi"]);
     }
 
-    // Base chain
     const base = usable
       ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
       : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
 
-    // Subtítulos: solo si existen y pedimos incluirlos
-    let filterParts = [
-      `${base},`,
-      `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,`,
-      `drawtext=text='${titleForFfmpeg}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2`
-    ];
+    let filter = `${base},drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,drawtext=text='${titleSafe}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2`;
 
     if (includeSubs && fs.existsSync(srtPath)) {
       const srtPosix = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-      filterParts.push(`,subtitles=${srtPosix}`);
+      filter += `,subtitles=${srtPosix}`;
     }
 
-    filterParts.push(`[v]`);
-    const filter = filterParts.join("");
+    filter += `[v]`;
 
     cmd
       .input(audioPath)
@@ -194,24 +180,20 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
       .save(outMp4);
   });
 
-  // 1) Intento con SRT
   try {
     return await runFF(true);
   } catch (e) {
-    console.error("FFmpeg con SRT falló, reintentando sin SRT:", e?.message || e);
-    // 2) Reintento sin SRT
+    console.error("FFmpeg con SRT falló, reintentando sin SRT:", e.message);
     return await runFF(false);
   }
 }
 
-
 /* ===========================
    ENDPOINT PRINCIPAL
 =========================== */
-
 app.post("/api/generate", async (req, res) => {
   try {
-    const { mode, redditUrl, storyTitle, script, voice, background, language, duration } = req.body || {};
+    const { mode, redditUrl, storyTitle, script, voice, background, duration } = req.body || {};
     let title = storyTitle || "RedditToReels";
     let bodyText = script || "";
 
@@ -228,17 +210,10 @@ app.post("/api/generate", async (req, res) => {
     await fs.promises.mkdir(workDir, { recursive: true });
 
     const audioPath = path.join(workDir, "voice.mp3");
-    const srtPath   = path.join(workDir, "captions.srt");
-    const outMp4    = path.join(workDir, "video.mp4");
+    const srtPath = path.join(workDir, "captions.srt");
+    const outMp4 = path.join(workDir, "video.mp4");
 
-    // Elegir proveedor por variable de entorno
-    const prov = (process.env.TTS_PROVIDER || "").toLowerCase();
-    if (prov === "openai") {
-      await ttsOpenAI(bodyText, voice, audioPath);
-    } else {
-      // Por defecto usa Polly
-      await ttsPolly(bodyText, voice, audioPath);
-    }
+    await ttsPolly(bodyText, voice, audioPath);
 
     const dur = await getAudioDurationSec(audioPath);
     makeSrtFromText(bodyText, dur, srtPath);
@@ -258,4 +233,4 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`API lista en ${BASE_URL}`));
+app.listen(PORT, () => console.log(`✅ API lista en ${BASE_URL}`));
