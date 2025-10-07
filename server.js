@@ -88,7 +88,6 @@ async function ttsPolly(text, uiVoice, outPath) {
    SUBTÍTULOS / AUDIO
 =========================== */
 
-// --- Crear subtítulos SRT ---
 function makeSrtFromText(text, audioDurationSec, outSrtPath) {
   const sentences = text.replace(/\n+/g, " ").match(/[^.!?。¡¿]+[.!?。]?/g) || [text];
   const totalChars = sentences.reduce((a, s) => a + s.length, 0) || 1;
@@ -116,7 +115,6 @@ function makeSrtFromText(text, audioDurationSec, outSrtPath) {
   fs.writeFileSync(outSrtPath, lines.join("\n"), "utf8");
 }
 
-// --- Obtener duración del audio ---
 function getAudioDurationSec(audioPath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(audioPath, (err, meta) => {
@@ -130,7 +128,19 @@ function getAudioDurationSec(audioPath) {
    RENDER DEL VIDEO
 =========================== */
 
-// 🔥 HOTFIX: render SIN usar `subtitles=` (evita error de FFmpeg)
+// Usa una fuente TTF local para drawtext
+function getFontFile() {
+  const tryPaths = [
+    path.join(__dirname, "assets", "fonts", "Inter-Regular.ttf"),
+    path.join(__dirname, "assets", "fonts", "Arial.ttf"),
+    path.join(__dirname, "assets", "fonts", "Roboto-Regular.ttf")
+  ];
+  for (const p of tryPaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
     gaming:   "assets/bg/gaming.mp4",
@@ -142,7 +152,14 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   const wantsSolid = String(bgKey || "").toLowerCase() === "solid";
   const requested  = bgMap[bgKey] || bgMap["abstract"];
   const usable     = wantsSolid ? false : (requested && fs.existsSync(requested));
-  const titleSafe  = (title || "RedditToReels").replace(/:/g, "\\:");
+
+  // Ruta POSIX para fontfile
+  const fontFile = getFontFile();
+  if (!fontFile) {
+    throw new Error("No se encontró una fuente TTF en assets/fonts. Sube por ejemplo assets/fonts/Inter-Regular.ttf");
+  }
+  const fontPosix = fontFile.replace(/\\/g, "/").replace(/:/g, "\\:");
+  const titleSafe = (title || "RedditToReels").replace(/:/g, "\\:");
 
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg();
@@ -150,7 +167,6 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
     if (usable) {
       cmd = cmd.input(requested);
     } else {
-      // Fondo sintético si no hay clip de fondo válido
       cmd = cmd.input("color=c=0x0a0f1f:s=1080x1920:r=30").inputOptions(["-f", "lavfi"]);
     }
 
@@ -158,11 +174,11 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
       ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
       : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
 
-    // Solo título; SIN `subtitles=...`
+    // 🔧 drawtext con fontfile explícito (evita depender de fontconfig del sistema)
     const filter =
       `${base},` +
       `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,` +
-      `drawtext=text='${titleSafe}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2` +
+      `drawtext=fontfile=${fontPosix}:text='${titleSafe}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2` +
       `[v]`;
 
     cmd
@@ -204,8 +220,8 @@ app.post("/api/generate", async (req, res) => {
     await fs.promises.mkdir(workDir, { recursive: true });
 
     const audioPath = path.join(workDir, "voice.mp3");
-    const srtPath = path.join(workDir, "captions.srt");
-    const outMp4 = path.join(workDir, "video.mp4");
+    const srtPath   = path.join(workDir, "captions.srt");
+    const outMp4    = path.join(workDir, "video.mp4");
 
     await ttsPolly(bodyText, voice, audioPath);
 
