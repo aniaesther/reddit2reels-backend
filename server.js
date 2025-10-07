@@ -162,20 +162,29 @@ function getAudioDurationSec(audioPath) {
     });
   });
 }
-
-// --- Renderizar video final ---
+// --- Renderizar video final con fallback si falta el MP4 ---
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
-    gaming: "assets/bg/gaming.mp4",
-    abstract: "assets/bg/abstract.mp4",
-    city: "assets/bg/city.mp4",
-    nature: "assets/bg/nature.mp4",
+    gaming:  "assets/bg/gaming.mp4",
+    abstract:"assets/bg/abstract.mp4",   // si no existe, generamos uno sintético
+    city:    "assets/bg/city.mp4",
+    nature:  "assets/bg/nature.mp4",
   };
-  const bgClip = bgMap[bgKey] || bgMap["abstract"];
+
+  const requested = bgMap[bgKey] || bgMap["abstract"];
+  const hasFile  = requested && fs.existsSync(requested);
+
   const safeTitle = (title || "RedditToReels").replace(/:/g, "\\:");
-  const safeSrt = srtPath.replace(/:/g, "\\:");
+  const safeSrt   = srtPath.replace(/:/g, "\\:");
+
+  // Cadena base de filtros de video (escala+aspecto+formato)
+  const baseChain = hasFile
+    ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
+    // Fondo sintético: color oscuro + ruido animado + escala
+    : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
+
   const filter = [
-    `[0:v]scale=1080:1920,setsar=1,format=yuv420p,`,
+    `${baseChain},`,
     `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,`,
     `drawtext=text='${safeTitle}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2,`,
     `subtitles='${safeSrt}'`,
@@ -183,8 +192,20 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   ].join("");
 
   return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(bgClip)
+    let cmd = ffmpeg();
+
+    if (hasFile) {
+      // Usamos el archivo real
+      cmd = cmd.input(requested);
+    } else {
+      // 🎨 Fondo sintético generado con lavfi
+      // color=c=0x0a0f1f → azul/negro; puedes cambiar el color
+      cmd = cmd
+        .input(`color=c=0x0a0f1f:s=1080x1920:r=30`)
+        .inputOptions(['-f', 'lavfi']);
+    }
+
+    cmd
       .input(audioPath)
       .complexFilter(filter)
       .outputOptions([
@@ -193,13 +214,14 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
         "-crf", "23",
-        ...(maxDurationSec ? ["-t", String(maxDurationSec)] : [])
+        ...(maxDurationSec ? ["-t", String(maxDurationSec)] : []),
       ])
       .on("error", reject)
       .on("end", () => resolve(outMp4))
       .save(outMp4);
   });
 }
+
 
 /* ===========================
    ENDPOINT PRINCIPAL
