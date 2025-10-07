@@ -197,18 +197,25 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   const useSolid  = wantsSolidBackground(bgKey);
   const usable    = useSolid ? false : await isUsableVideo(requested);
 
-  const safeTitle = (title || "RedditToReels").replace(/:/g, "\\:");
-  const safeSrt   = srtPath.replace(/:/g, "\\:");
+  // --- Corregimos la ruta del SRT para ffmpeg ---
+  if (!fs.existsSync(srtPath)) {
+    throw new Error(`SRT no existe en: ${srtPath}`);
+  }
+  const srtPosix = srtPath.replace(/\\/g, "/"); // separadores POSIX
+  const srtForFfmpeg = srtPosix.replace(/:/g, "\\:"); // escapar ':' si existiera
+
+  const titleForFfmpeg = (title || "RedditToReels").replace(/:/g, "\\:");
 
   const baseChain = usable
     ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
     : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
 
+  // Nota: NO ponemos comillas alrededor del path del SRT
   const filter = [
     `${baseChain},`,
     `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,`,
-    `drawtext=text='${safeTitle}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2,`,
-    `subtitles='${safeSrt}'`,
+    `drawtext=text='${titleForFfmpeg}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2,`,
+    `subtitles=${srtForFfmpeg}`,
     `[v]`
   ].join("");
 
