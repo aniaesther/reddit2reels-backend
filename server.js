@@ -125,66 +125,7 @@ async function ttsOpenAI(text, uiVoice, outPath) {
 =========================== */
 
 // Crear subtítulos SRT (distribución por longitud)
-function makeSrtFromText(text, audioDurationSec, outSrtPath) {
-  const sentences = text.replace(/\n+/g, " ").match(/[^.!?。¡¿]+[.!?。]?/g) || [text];
-  const totalChars = sentences.reduce((a, s) => a + s.length, 0) || 1;
-  let cursor = 0, idx = 1;
-  const lines = [];
-
-  const toTimestamp = (sec) => {
-    const ms = Math.floor(sec * 1000);
-    const h = String(Math.floor(ms / 3600000)).padStart(2, "0");
-    const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, "0");
-    const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, "0");
-    const ms3 = String(ms % 1000).padStart(3, "0");
-    return `${h}:${m}:${s},${ms3}`;
-  };
-
-  sentences.forEach((s) => {
-    const portion = s.length / totalChars;
-    const dur = Math.max(1.2, audioDurationSec * portion);
-    const start = cursor;
-    const end = Math.min(audioDurationSec, cursor + dur);
-    lines.push(`${idx++}\n${toTimestamp(start)} --> ${toTimestamp(end)}\n${s.trim()}\n`);
-    cursor = end;
-  });
-
-  fs.writeFileSync(outSrtPath, lines.join("\n"), "utf8");
-}
-
-// Duración de audio
-function getAudioDurationSec(audioPath) {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(audioPath, (err, meta) => {
-      if (err) return reject(err);
-      resolve(meta?.format?.duration || 0);
-    });
-  });
-}
-
-// Verifica con ffprobe si el archivo de video es usable
-async function isUsableVideo(videoPath) {
-  if (!videoPath) return false;
-  if (!fs.existsSync(videoPath)) return false;
-  try {
-    await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(videoPath, (err /*, meta */) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Permite forzar fondo sintético desde el payload con "background":"solid"
-function wantsSolidBackground(bgKey) {
-  return String(bgKey || "").toLowerCase() === "solid";
-}
-
-// Renderizar video final con verificación y fallback
+// Render con reintento: con SRT -> si falla, sin SRT
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
     gaming:   "assets/bg/gaming.mp4",
@@ -193,43 +134,39 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
     nature:   "assets/bg/nature.mp4",
   };
 
-  const requested = bgMap[bgKey] || bgMap["abstract"];
-  const useSolid  = wantsSolidBackground(bgKey);
-  const usable    = useSolid ? false : await isUsableVideo(requested);
-
-  // --- Corregimos la ruta del SRT para ffmpeg ---
-  if (!fs.existsSync(srtPath)) {
-    throw new Error(`SRT no existe en: ${srtPath}`);
-  }
-  const srtPosix = srtPath.replace(/\\/g, "/"); // separadores POSIX
-  const srtForFfmpeg = srtPosix.replace(/:/g, "\\:"); // escapar ':' si existiera
-
+  // Helpers
+  const wantsSolid = String(bgKey || "").toLowerCase() === "solid";
+  const requested  = bgMap[bgKey] || bgMap["abstract"];
+  const usable     = wantsSolid ? false : (requested && fs.existsSync(requested));
   const titleForFfmpeg = (title || "RedditToReels").replace(/:/g, "\\:");
-
-  const baseChain = usable
-    ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
-    : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
-
-  // Nota: NO ponemos comillas alrededor del path del SRT
-  const filter = [
-    `${baseChain},`,
-    `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,`,
-    `drawtext=text='${titleForFfmpeg}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2,`,
-    `subtitles=${srtForFfmpeg}`,
-    `[v]`
-  ].join("");
-
-  return new Promise((resolve, reject) => {
+  const runFF = (includeSubs) => new Promise((resolve, reject) => {
     let cmd = ffmpeg();
 
     if (usable) {
       cmd = cmd.input(requested);
     } else {
-      // Fondo sintético (color + ruido animado)
-      cmd = cmd
-        .input(`color=c=0x0a0f1f:s=1080x1920:r=30`)
-        .inputOptions(["-f", "lavfi"]);
+      cmd = cmd.input("color=c=0x0a0f1f:s=1080x1920:r=30").inputOptions(["-f","lavfi"]);
     }
+
+    // Base chain
+    const base = usable
+      ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
+      : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
+
+    // Subtítulos: solo si existen y pedimos incluirlos
+    let filterParts = [
+      `${base},`,
+      `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,`,
+      `drawtext=text='${titleForFfmpeg}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2`
+    ];
+
+    if (includeSubs && fs.existsSync(srtPath)) {
+      const srtPosix = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+      filterParts.push(`,subtitles=${srtPosix}`);
+    }
+
+    filterParts.push(`[v]`);
+    const filter = filterParts.join("");
 
     cmd
       .input(audioPath)
@@ -240,13 +177,23 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
         "-crf", "23",
-        ...(maxDurationSec ? ["-t", String(maxDurationSec)] : []),
+        ...(maxDurationSec ? ["-t", String(maxDurationSec)] : [])
       ])
       .on("error", reject)
       .on("end", () => resolve(outMp4))
       .save(outMp4);
   });
+
+  // 1) Intento con SRT
+  try {
+    return await runFF(true);
+  } catch (e) {
+    console.error("FFmpeg con SRT falló, reintentando sin SRT:", e?.message || e);
+    // 2) Reintento sin SRT
+    return await runFF(false);
+  }
 }
+
 
 /* ===========================
    ENDPOINT PRINCIPAL
