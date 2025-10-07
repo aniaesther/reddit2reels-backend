@@ -126,6 +126,16 @@ async function ttsOpenAI(text, uiVoice, outPath) {
 
 // Crear subtítulos SRT (distribución por longitud)
 // Render con reintento: con SRT -> si falla, sin SRT
+// --- Calcular duración del audio ---
+function getAudioDurationSec(audioPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(audioPath, (err, meta) => {
+      if (err) return reject(err);
+      resolve(meta?.format?.duration || 0);
+    });
+  });
+}
+
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
     gaming:   "assets/bg/gaming.mp4",
