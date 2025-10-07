@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from "uuid";
 import { fileURLToPath } from "url";
 import "dotenv/config";
 
-// --- Apuntar fluent-ffmpeg a los binarios estáticos ---
+// Apuntar fluent-ffmpeg a los binarios estáticos
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
@@ -55,7 +55,6 @@ async function fetchRedditText(redditUrl) {
 
 // --- TTS con AWS Polly (mp3) ---
 async function ttsPolly(text, uiVoice, outPath) {
-  // Voces sugeridas (ajusta si quieres)
   const voiceMap = {
     "female-calm": "Lucia",          // es-ES
     "female-enthusiastic": "Lucia",  // es-ES
@@ -125,7 +124,7 @@ async function ttsOpenAI(text, uiVoice, outPath) {
    SUBTÍTULOS / RENDER
 =========================== */
 
-// --- Crear subtítulos SRT ---
+// Crear subtítulos SRT (distribución por longitud)
 function makeSrtFromText(text, audioDurationSec, outSrtPath) {
   const sentences = text.replace(/\n+/g, " ").match(/[^.!?。¡¿]+[.!?。]?/g) || [text];
   const totalChars = sentences.reduce((a, s) => a + s.length, 0) || 1;
@@ -153,7 +152,7 @@ function makeSrtFromText(text, audioDurationSec, outSrtPath) {
   fs.writeFileSync(outSrtPath, lines.join("\n"), "utf8");
 }
 
-// --- Calcular duración de audio ---
+// Duración de audio
 function getAudioDurationSec(audioPath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(audioPath, (err, meta) => {
@@ -162,25 +161,47 @@ function getAudioDurationSec(audioPath) {
     });
   });
 }
-// --- Renderizar video final con fallback si falta el MP4 ---
+
+// Verifica con ffprobe si el archivo de video es usable
+async function isUsableVideo(videoPath) {
+  if (!videoPath) return false;
+  if (!fs.existsSync(videoPath)) return false;
+  try {
+    await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(videoPath, (err /*, meta */) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Permite forzar fondo sintético desde el payload con "background":"solid"
+function wantsSolidBackground(bgKey) {
+  return String(bgKey || "").toLowerCase() === "solid";
+}
+
+// Renderizar video final con verificación y fallback
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
-    gaming:  "assets/bg/gaming.mp4",
-    abstract:"assets/bg/abstract.mp4",   // si no existe, generamos uno sintético
-    city:    "assets/bg/city.mp4",
-    nature:  "assets/bg/nature.mp4",
+    gaming:   "assets/bg/gaming.mp4",
+    abstract: "assets/bg/abstract.mp4",
+    city:     "assets/bg/city.mp4",
+    nature:   "assets/bg/nature.mp4",
   };
 
   const requested = bgMap[bgKey] || bgMap["abstract"];
-  const hasFile  = requested && fs.existsSync(requested);
+  const useSolid  = wantsSolidBackground(bgKey);
+  const usable    = useSolid ? false : await isUsableVideo(requested);
 
   const safeTitle = (title || "RedditToReels").replace(/:/g, "\\:");
   const safeSrt   = srtPath.replace(/:/g, "\\:");
 
-  // Cadena base de filtros de video (escala+aspecto+formato)
-  const baseChain = hasFile
+  const baseChain = usable
     ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
-    // Fondo sintético: color oscuro + ruido animado + escala
     : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
 
   const filter = [
@@ -194,15 +215,13 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg();
 
-    if (hasFile) {
-      // Usamos el archivo real
+    if (usable) {
       cmd = cmd.input(requested);
     } else {
-      // 🎨 Fondo sintético generado con lavfi
-      // color=c=0x0a0f1f → azul/negro; puedes cambiar el color
+      // Fondo sintético (color + ruido animado)
       cmd = cmd
         .input(`color=c=0x0a0f1f:s=1080x1920:r=30`)
-        .inputOptions(['-f', 'lavfi']);
+        .inputOptions(["-f", "lavfi"]);
     }
 
     cmd
@@ -222,7 +241,6 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   });
 }
 
-
 /* ===========================
    ENDPOINT PRINCIPAL
 =========================== */
@@ -232,11 +250,13 @@ app.post("/api/generate", async (req, res) => {
     const { mode, redditUrl, storyTitle, script, voice, background, language, duration } = req.body || {};
     let title = storyTitle || "RedditToReels";
     let bodyText = script || "";
+
     if (mode === "url") {
       const { title: t, script: s } = await fetchRedditText(redditUrl);
       title = t || title;
       if (!bodyText) bodyText = s;
     }
+
     if (!bodyText?.trim()) return res.status(400).json({ error: "No hay texto para narrar." });
 
     const id = uuidv4();
@@ -249,9 +269,7 @@ app.post("/api/generate", async (req, res) => {
 
     // Elegir proveedor por variable de entorno
     const prov = (process.env.TTS_PROVIDER || "").toLowerCase();
-    if (prov === "polly") {
-      await ttsPolly(bodyText, voice, audioPath);
-    } else if (prov === "openai") {
+    if (prov === "openai") {
       await ttsOpenAI(bodyText, voice, audioPath);
     } else {
       // Por defecto usa Polly
