@@ -26,10 +26,14 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 app.get("/", (_req, res) => {
-  res.send("RedditToReels API ✅ Usa POST /api/generate");
+  res.send("✅ RedditToReels API funcionando. Usa POST /api/generate");
 });
 
-// --- Extraer texto desde Reddit ---
+/* ===========================
+   FUNCIONES AUXILIARES
+=========================== */
+
+// Lee texto de Reddit
 async function fetchRedditText(redditUrl) {
   try {
     const fixed = redditUrl.endsWith("/") ? redditUrl + ".json" : redditUrl + "/.json";
@@ -49,7 +53,7 @@ async function fetchRedditText(redditUrl) {
 }
 
 /* ===========================
-   TTS (Text-to-Speech)
+   TTS (Text-to-Speech con Polly)
 =========================== */
 
 async function ttsPolly(text, uiVoice, outPath) {
@@ -85,7 +89,7 @@ async function ttsPolly(text, uiVoice, outPath) {
 }
 
 /* ===========================
-   SUBTÍTULOS / AUDIO
+   SUBTÍTULOS
 =========================== */
 
 function makeSrtFromText(text, audioDurationSec, outSrtPath) {
@@ -125,22 +129,39 @@ function getAudioDurationSec(audioPath) {
 }
 
 /* ===========================
-   RENDER DEL VIDEO
+   VIDEO
 =========================== */
 
-// Usa una fuente TTF local para drawtext
+// Busca fuentes locales (si existen)
 function getFontFile() {
   const tryPaths = [
     path.join(__dirname, "assets", "fonts", "Inter-Regular.ttf"),
+    path.join(__dirname, "assets", "fonts", "Roboto-Regular.ttf"),
     path.join(__dirname, "assets", "fonts", "Arial.ttf"),
-    path.join(__dirname, "assets", "fonts", "Roboto-Regular.ttf")
   ];
-  for (const p of tryPaths) {
-    if (fs.existsSync(p)) return p;
-  }
+  for (const p of tryPaths) if (fs.existsSync(p)) return p;
   return null;
 }
 
+// Detecta si ffmpeg soporta drawtext
+async function supportsDrawtext() {
+  let ok = true;
+  const probeOut = path.join(__dirname, ".__probe_ignore.mp4");
+  await new Promise((resolve) => {
+    ffmpeg()
+      .on("stderr", (l) => { if (/No such filter: 'drawtext'|freetype/i.test(l)) ok = false; })
+      .on("error", () => resolve())
+      .on("end", () => resolve())
+      .input("color=black:s=16x16:r=1").inputOptions(["-f", "lavfi"])
+      .complexFilter("drawtext=text=hi:fontcolor=white")
+      .frames(1)
+      .save(probeOut);
+  });
+  try { fs.unlinkSync(probeOut); } catch {}
+  return ok;
+}
+
+// Render del video (a prueba de fallos)
 async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurationSec }) {
   const bgMap = {
     gaming:   "assets/bg/gaming.mp4",
@@ -153,13 +174,16 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   const requested  = bgMap[bgKey] || bgMap["abstract"];
   const usable     = wantsSolid ? false : (requested && fs.existsSync(requested));
 
-  // Ruta POSIX para fontfile
   const fontFile = getFontFile();
-  if (!fontFile) {
-    throw new Error("No se encontró una fuente TTF en assets/fonts. Sube por ejemplo assets/fonts/Inter-Regular.ttf");
-  }
-  const fontPosix = fontFile.replace(/\\/g, "/").replace(/:/g, "\\:");
-  const titleSafe = (title || "RedditToReels").replace(/:/g, "\\:");
+  const hasDraw  = fontFile ? await supportsDrawtext() : false;
+
+  const titleRaw  = title || "RedditToReels";
+  const titleSafe = titleRaw
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
+
+  const fontPosix = fontFile ? fontFile.replace(/\\/g, "/").replace(/:/g, "\\:") : null;
 
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg();
@@ -170,29 +194,29 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
       cmd = cmd.input("color=c=0x0a0f1f:s=1080x1920:r=30").inputOptions(["-f", "lavfi"]);
     }
 
-    const base = usable
-      ? `[0:v]scale=1080:1920,setsar=1,format=yuv420p`
-      : `[0:v]format=yuv420p,noise=alls=20:allf=t,scale=1080:1920,setsar=1`;
+    const base = `[0:v]scale=1080:1920,setsar=1,format=yuv420p`;
 
-    // 🔧 drawtext con fontfile explícito (evita depender de fontconfig del sistema)
-    const filter =
-      `${base},` +
-      `drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled,` +
-      `drawtext=fontfile=${fontPosix}:text='${titleSafe}':fontcolor=white:fontsize=52:x=(w-text_w)/2:y=130:shadowx=2:shadowy=2` +
-      `[v]`;
+    const overlay = (fontPosix && hasDraw)
+      ? `,drawbox=x=80:y=100:w=920:h=160:color=black@0.4:t=filled` +
+        `,drawtext=fontfile=${fontPosix}:text='${titleSafe}':fontcolor=white:fontsize=52:` +
+        `x=(w-text_w)/2:y=130:shadowx=2:shadowy=2`
+      : ``;
+
+    const filter = `${base}${overlay}[v]`;
 
     cmd
       .input(audioPath)
       .complexFilter(filter)
       .outputOptions([
         "-map", "[v]", "-map", "1:a",
-        "-shortest", "-r", "30",
+        "-shortest",
+        "-r", "30",
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
         "-crf", "23",
         ...(maxDurationSec ? ["-t", String(maxDurationSec)] : [])
       ])
-      .on("error", reject)
+      .on("error", (e) => reject(e))
       .on("end", () => resolve(outMp4))
       .save(outMp4);
   });
@@ -201,6 +225,7 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
 /* ===========================
    ENDPOINT PRINCIPAL
 =========================== */
+
 app.post("/api/generate", async (req, res) => {
   try {
     const { mode, redditUrl, storyTitle, script, voice, background, duration } = req.body || {};
