@@ -2,11 +2,17 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import ffmpeg from "fluent-ffmpeg";
+import ffmpegPath from "ffmpeg-static";
+import ffprobeStatic from "ffprobe-static";
 import fs from "fs";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import { fileURLToPath } from "url";
 import "dotenv/config";
+
+// --- Apuntar fluent-ffmpeg a los binarios estáticos ---
+ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfprobePath(ffprobeStatic.path);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +24,11 @@ app.use("/outputs", express.static(path.join(__dirname, "outputs")));
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+
+// Página raíz amigable
+app.get("/", (_req, res) => {
+  res.send("RedditToReels API ✅ Usa POST /api/generate");
+});
 
 // --- Utilidad para extraer texto de Reddit ---
 async function fetchRedditText(redditUrl) {
@@ -38,15 +49,18 @@ async function fetchRedditText(redditUrl) {
   }
 }
 
+/* ===========================
+   TTS PROVEEDORES
+=========================== */
+
 // --- TTS con AWS Polly (mp3) ---
 async function ttsPolly(text, uiVoice, outPath) {
-  // Voces comunes (puedes cambiarlas): es-ES Conchita/Enrique, es-MX Mia, es-US Lupe,
-  // en-US Joanna/Matthew, etc.
+  // Voces sugeridas (ajusta si quieres)
   const voiceMap = {
-    "female-calm": "Lucia",           // es-ES
-    "female-enthusiastic": "Lucia",   // es-ES
-    "male-deep": "Enrique",           // es-ES
-    "male-energetic": "Miguel"        // es-ES
+    "female-calm": "Lucia",          // es-ES
+    "female-enthusiastic": "Lucia",  // es-ES
+    "male-deep": "Enrique",          // es-ES
+    "male-energetic": "Miguel"       // es-ES
   };
   const voiceId = voiceMap[uiVoice] || "Lucia";
 
@@ -73,6 +87,43 @@ async function ttsPolly(text, uiVoice, outPath) {
   return outPath;
 }
 
+// --- TTS con OpenAI (opcional) ---
+async function ttsOpenAI(text, uiVoice, outPath) {
+  const voiceMap = {
+    "male-energetic": "alloy",
+    "female-calm": "alloy",
+    "male-deep": "alloy",
+    "female-enthusiastic": "alloy",
+  };
+  const voice = voiceMap[uiVoice] || "alloy";
+
+  const res = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "tts-1",
+      voice,
+      input: text,
+      format: "mp3"
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => "");
+    throw new Error("OpenAI TTS error: " + err);
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  await fs.promises.writeFile(outPath, buf);
+  return outPath;
+}
+
+/* ===========================
+   SUBTÍTULOS / RENDER
+=========================== */
 
 // --- Crear subtítulos SRT ---
 function makeSrtFromText(text, audioDurationSec, outSrtPath) {
@@ -150,7 +201,10 @@ async function renderVideo({ bgKey, audioPath, srtPath, title, outMp4, maxDurati
   });
 }
 
-// --- Endpoint principal ---
+/* ===========================
+   ENDPOINT PRINCIPAL
+=========================== */
+
 app.post("/api/generate", async (req, res) => {
   try {
     const { mode, redditUrl, storyTitle, script, voice, background, language, duration } = req.body || {};
@@ -168,20 +222,23 @@ app.post("/api/generate", async (req, res) => {
     await fs.promises.mkdir(workDir, { recursive: true });
 
     const audioPath = path.join(workDir, "voice.mp3");
-    const srtPath = path.join(workDir, "captions.srt");
-    const outMp4 = path.join(workDir, "video.mp4");
+    const srtPath   = path.join(workDir, "captions.srt");
+    const outMp4    = path.join(workDir, "video.mp4");
 
+    // Elegir proveedor por variable de entorno
     const prov = (process.env.TTS_PROVIDER || "").toLowerCase();
     if (prov === "polly") {
-    await ttsPolly(bodyText, voice, audioPath);
+      await ttsPolly(bodyText, voice, audioPath);
     } else if (prov === "openai") {
-    await ttsOpenAI(bodyText, voice, audioPath);
+      await ttsOpenAI(bodyText, voice, audioPath);
     } else {
-   // fallback por si no seteaste variable (puedes dejar polly por defecto)
-   await ttsPolly(bodyText, voice, audioPath);
-  }
+      // Por defecto usa Polly
+      await ttsPolly(bodyText, voice, audioPath);
+    }
+
     const dur = await getAudioDurationSec(audioPath);
     makeSrtFromText(bodyText, dur, srtPath);
+
     const maxDurationSec = duration ? Number(duration) : undefined;
     await renderVideo({ bgKey: background, audioPath, srtPath, title, outMp4, maxDurationSec });
 
